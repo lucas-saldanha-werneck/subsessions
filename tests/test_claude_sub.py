@@ -249,9 +249,11 @@ class EndToEnd(unittest.TestCase):
         self.addCleanup(subprocess.run, ["tmux", "-L", drv, "kill-server"], capture_output=True)
         subprocess.run(["tmux", "-L", drv, "-f", "/dev/null", "new-session", "-d", "-s", "d", "-x", "60", "-y", "20",
                         f"unset TMUX; exec tmux -L {self.outer} attach-session -t main"], check=True)
+        # No bar of the driver's own: the attached client gets all 20 rows, the user's bar is row 20.
+        subprocess.run(["tmux", "-L", drv, "set-option", "-g", "status", "off"], check=True)
         active = lambda: self.outer_q("display-message", "-p", "-t", "=main:", "#{window_index}")
-        screen = lambda: subprocess.run(["tmux", "-L", drv, "capture-pane", "-p", "-t", "d:"],
-                                        capture_output=True, text=True).stdout
+        screen = lambda: "active=" + active() + "\n" + subprocess.run(
+            ["tmux", "-L", drv, "capture-pane", "-p", "-t", "d:"], capture_output=True, text=True).stdout
 
         def click(x, y=20):
             subprocess.run(["tmux", "-L", drv, "send-keys", "-t", "d:", "-l", f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m"])

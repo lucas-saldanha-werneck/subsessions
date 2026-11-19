@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 
 import {
-  POLL_SCRIPT, buildRow, emptyTranscript, foldTranscript, formatRow, parseDelivery, parsePoll,
+  POLL_SCRIPT, buildRow, emptyTranscript, foldTranscript, formatRow, ownSubs, parseDelivery, parsePoll,
   parseProtocol, transcriptPath,
 } from './status'
 import type { Polled, Protocol, Row, Transcript } from './status'
@@ -56,7 +56,10 @@ async function poll($: EngineInterface): Promise<void> {
   polling = true
   try {
     const r = await $.process.run(['sh', '-c', POLL_SCRIPT], { timeoutMs: 15000 })
-    const { configDir, subs } = parsePoll(r.stdout)
+    const polled = parsePoll(r.stdout)
+    const configDir = polled.configDir
+    // Only the subsessions this session started; another window's stay in that window.
+    const subs = ownSubs(polled.subs, polled.self)
     known = subs.map(s => s.name)
     const now: number = await $.clock.now()
     const next: Row[] = []

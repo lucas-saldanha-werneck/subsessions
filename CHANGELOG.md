@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 (2026-11-19)
+
+- The status band shows only the subsessions this session started. Before, every Claude window on the computer showed every subsession. `claude-sub start` records the starting session (tmux option `@parent`); a subsession started by an older version still shows everywhere.
+
 ## 0.2.0 (2026-11-19)
 
 - Status band (a mod): one row per running subsession directly above the prompt, in the terminal and the desktop app. It shows the state (busy, idle, question, waiting for permission, done), the protocol step, the current action, the time on the task, the cost, the context used and the process memory. Nothing is drawn while no subsession runs.

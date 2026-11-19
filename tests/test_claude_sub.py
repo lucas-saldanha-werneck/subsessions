@@ -108,6 +108,17 @@ class EndToEnd(unittest.TestCase):
         r = self.run_cli("stop", "sub-proj")
         self.assertEqual(json.loads(r.stdout), {"stopped": ["sub-proj"], "left": []})
 
+    def test_start_records_the_owner_session(self):
+        r = self.run_cli("start", self.folder, "--name", "owned", CLAUDE_PID="4242")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        o = subprocess.run(["tmux", "-L", self.sock, "show-options", "-v", "-t", "=owned:", "@parent"],
+                           capture_output=True, text=True)
+        self.assertEqual(o.stdout.strip(), "4242")
+        # The band's format reads it back per pane.
+        o = subprocess.run(["tmux", "-L", self.sock, "list-panes", "-a", "-F", "#{session_name} #{@parent}"],
+                           capture_output=True, text=True)
+        self.assertIn("owned 4242", o.stdout)
+
     def test_limit_and_duplicate(self):
         self.assertEqual(self.run_cli("start", self.folder, "--name", "a").returncode, 0)
         r = self.run_cli("start", self.folder, "--name", "a", CLAUDE_SUB_MAX="3")

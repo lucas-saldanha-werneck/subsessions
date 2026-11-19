@@ -19,7 +19,7 @@ phone ──Remote Control──▶ main session ──SendMessage──▶ subs
 
 - **`subsession` skill**: tells Claude when to use a subsession, the message protocol (`progress:`, `done:`, `question:`), and to check the result before calling it done.
 - **`claude-sub`**: starts, lists, shows and stops subsessions.
-- **Status band** (a [mod](https://code.claude.com/docs/en/plugins/mods/interface)): in the terminal and the desktop app, one row per running subsession directly above the prompt. Nothing is drawn while none runs.
+- **Status band** (a [mod](https://code.claude.com/docs/en/plugins/mods/interface)): in the terminal and the desktop app, one row per running subsession this session started, directly above the prompt. Another window's subsessions stay in that window. Nothing is drawn while none runs.
 
 ```
 ⚙ sub-docs · busy · 2/3 git status · Bash: git status --porcelain · 1m20s · $0.21 · ctx 5% · 410 MB

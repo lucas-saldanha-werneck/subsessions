@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 
 import {
   buildRow, describeTool, emptyTranscript, foldTranscript, formatDuration, formatRow, parseDelivery,
-  parsePoll, parseProtocol, parseScreen, rowText, transcriptPath,
+  ownSubs, parsePoll, parseProtocol, parseScreen, rowText, transcriptPath,
 } from '../hooks/status.ts'
 import type { Polled } from '../hooks/status.ts'
 
@@ -95,6 +95,20 @@ test('parsePoll splits subsessions', () => {
   assert.deepEqual(subs[1]?.session, {})
   assert.deepEqual(parsePoll('CFG\t/h\n').subs, [])
   assert.equal(transcriptPath('/h/.claude', '/w/x.y/AI-Tools', 's1'), '/h/.claude/projects/-w-x-y-AI-Tools/s1.jsonl')
+})
+
+test('parsePoll reads this session and each owner; ownSubs keeps only this session\'s', () => {
+  const out = 'CFG\t/h\nSELF\t900\n\x1emine\t11\t1\t900\n{}\n\x1eother\t22\t1\t901\n{}\n\x1eold\t33\t1\t\n{}\n\x1eme\t900\t1\t\n{}\n'
+  const { self, subs } = parsePoll(out)
+  assert.equal(self, 900)
+  assert.equal(subs[0]?.parent, 900)
+  assert.equal(subs[1]?.parent, 901)
+  assert.equal(subs[2]?.parent, undefined)
+  // Another window's subsession and this session's own row stay out; one with no owner shows.
+  assert.deepEqual(ownSubs(subs, self).map(s => s.name), ['mine', 'old'])
+  // Pid unknown: everything, as before.
+  assert.equal(ownSubs(subs, 0).length, 4)
+  assert.equal(parsePoll('CFG\t/h\n').self, 0)
 })
 
 const polled = (o: Partial<Polled> = {}): Polled => ({

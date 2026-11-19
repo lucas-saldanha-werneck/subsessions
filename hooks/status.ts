@@ -43,6 +43,7 @@ export type Polled = {
   rssKb: number
   session: { sessionId?: string; cwd?: string; status?: string; startedAt?: number }
   screen: string
+  parent?: number // pid of the session that started it (claude-sub 0.2.1+)
 }
 
 export type Row = {
@@ -193,26 +194,45 @@ export function parseScreen(screen: string): Screen {
 
 export const POLL_SCRIPT = `S="\${CLAUDE_SUB_SOCKET:-claude-sub}"; CFG="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 printf 'CFG\\t%s\\n' "$CFG"
-tmux -L "$S" list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null | while read -r n p; do
-  printf '\\036%s\\t%s\\t%s\\n' "$n" "$p" "$(ps -o rss= -p "$p" 2>/dev/null | tr -d ' ')"
+# This session's pid: CLAUDE_PID, or the nearest parent process with a session file.
+me="\${CLAUDE_PID:-}"; c=$$; i=0
+while [ -z "$me" ] && [ "\${c:-1}" -gt 1 ] && [ $i -lt 20 ]; do
+  [ -f "$CFG/sessions/$c.json" ] && me=$c
+  c=$(ps -o ppid= -p "$c" 2>/dev/null | tr -d ' '); i=$((i+1))
+done
+printf 'SELF\\t%s\\n' "$me"
+tmux -L "$S" list-panes -a -F '#{session_name} #{pane_pid} #{@parent}' 2>/dev/null | while read -r n p o; do
+  printf '\\036%s\\t%s\\t%s\\t%s\\n' "$n" "$p" "$(ps -o rss= -p "$p" 2>/dev/null | tr -d ' ')" "$o"
   head -c 65536 "$CFG/sessions/$p.json" 2>/dev/null | tr -d '\\n'; printf '\\n'
   tmux -L "$S" capture-pane -p -J -t "=$n:" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 25
 done`
 
-/** Parses what POLL_SCRIPT printed. */
-export function parsePoll(out: string): { configDir: string; subs: Polled[] } {
+/** Parses what POLL_SCRIPT printed. `self` is this session's pid (0 when unknown). */
+export function parsePoll(out: string): { configDir: string; self: number; subs: Polled[] } {
   const parts = (out || '').split('\x1e')
   const head = /^CFG\t(.*)$/m.exec(parts[0] || '')
+  const me = /^SELF\t(\d*)$/m.exec(parts[0] || '')
   const subs: Polled[] = []
   for (const part of parts.slice(1)) {
     const lines = part.split('\n')
-    const [name, pid, rss] = (lines[0] || '').split('\t')
+    const [name, pid, rss, parent] = (lines[0] || '').split('\t')
     if (!name) continue
     let session = {}
     try { session = JSON.parse(lines[1] || '{}') } catch { /* no session file yet */ }
-    subs.push({ name, pid: Number(pid) || 0, rssKb: Number(rss) || 0, session, screen: lines.slice(2).join('\n') })
+    const one: Polled = { name, pid: Number(pid) || 0, rssKb: Number(rss) || 0, session, screen: lines.slice(2).join('\n') }
+    if (Number(parent)) one.parent = Number(parent)
+    subs.push(one)
   }
-  return { configDir: head?.[1] ?? '', subs }
+  return { configDir: head?.[1] ?? '', self: Number(me?.[1]) || 0, subs }
+}
+
+/**
+ * The subsessions this session's band shows: the ones it started. One started by an older
+ * claude-sub (no owner recorded), or a session whose pid is unknown, shows them all, as before.
+ */
+export function ownSubs(subs: Polled[], self: number): Polled[] {
+  if (!self) return subs
+  return subs.filter(s => s.pid !== self && (s.parent === undefined || s.parent === self))
 }
 
 /** Where Claude Code keeps a session's transcript. */

@@ -15,6 +15,7 @@ case "$1" in
 esac
 echo "ARGS=$*"
 echo "CODE_MODE=${CLAUDE_CODE_EXPERIMENTAL_CODE_MODE:-unset} CLAUDECODE=${CLAUDECODE:-unset}"
+echo "SUB_NAME=${CLAUDE_SUB_NAME:-unset} SUB_PARENT=${CLAUDE_SUB_PARENT:-unset}"
 case "${FAKE_MODE:-on}" in
   confirm)
     echo "  ❯ No, start without it"; echo "    Yes, turn on Code Mode"
@@ -103,6 +104,8 @@ class EndToEnd(unittest.TestCase):
         scr = self.screen("sub-proj")
         self.assertIn("CODE_MODE=1 CLAUDECODE=unset", scr)   # Code Mode set, parent session vars removed
         self.assertIn("ARGS=--name sub-proj --model sonnet", scr)
+        # Started outside any session (no CLAUDE_PID, no session file above): a name, no parent.
+        self.assertIn("SUB_NAME=sub-proj SUB_PARENT=", scr)
         rows = json.loads(self.run_cli("list").stdout)
         self.assertEqual([x["name"] for x in rows], ["sub-proj"])
         r = self.run_cli("stop", "sub-proj")
@@ -118,6 +121,8 @@ class EndToEnd(unittest.TestCase):
         o = subprocess.run(["tmux", "-L", self.sock, "list-panes", "-a", "-F", "#{session_name} #{@parent}"],
                            capture_output=True, text=True)
         self.assertIn("owned 4242", o.stdout)
+        # The subsession's own process knows its name and the session that started it.
+        self.assertIn("SUB_NAME=owned SUB_PARENT=4242", self.screen("owned"))
 
     def test_limit_and_duplicate(self):
         self.assertEqual(self.run_cli("start", self.folder, "--name", "a").returncode, 0)

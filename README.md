@@ -62,6 +62,8 @@ Then ask Claude: "use a subsession to …", or type `/subsession`.
 | `CLAUDE_SUB_TIMEOUT` | `90` | seconds `start` waits for Code Mode |
 | `CLAUDE_SUB_CLAUDE` | `claude` on PATH | the claude binary to run |
 
+The subsession itself runs with `CLAUDE_SUB_NAME` (its name) and `CLAUDE_SUB_PARENT` (the pid of the session that started it), so mods in it can tell whose subsession it is. [assumptions-pane](https://github.com/lucas-saldanha-werneck/assumptions-pane) 0.6.0 uses them to list the subsession's assumptions in the starting session's pane.
+
 ## Limits
 
 - You cannot see a subsession from the phone: Code Mode has no Remote Control. You see what the main session relays.

@@ -38,6 +38,8 @@ phone ──Remote Control──▶ main session ──SendMessage──▶ subs
 
 `--yes` accepts the one-time Code Mode confirmation. Without it, `start` stops at that prompt.
 
+**A tab in your tmux.** When the session that starts a subsession runs inside tmux, the subsession also gets a tab (window) in that tmux session, named `⚙ <name>`. Click it (with `mouse on`) or select it to watch the conversation and type into it; click your main window to go back. The tab opens in the background, so the window you are in keeps the focus, and it closes by itself when the subsession stops, is killed or crashes. Closing the tab leaves the subsession running. The tab is a tmux client attached to the subsession's own tmux server, so the subsession's status bar is turned off to leave only your bar. From the desktop app or a terminal without tmux nothing changes.
+
 ## Install
 
 ```bash
@@ -61,6 +63,8 @@ Then ask Claude: "use a subsession to …", or type `/subsession`.
 | `CLAUDE_SUB_SOCKET` | `claude-sub` | tmux socket name, kept apart from your own tmux |
 | `CLAUDE_SUB_TIMEOUT` | `90` | seconds `start` waits for Code Mode |
 | `CLAUDE_SUB_CLAUDE` | `claude` on PATH | the claude binary to run |
+| `CLAUDE_SUB_TAB` | `1` | `0`: no tab in the starting session's tmux |
+| `CLAUDE_SUB_TAB_PREFIX` | `⚙ ` | text before the subsession's name in the tab |
 
 The subsession itself runs with `CLAUDE_SUB_NAME` (its name) and, when it was started from a Claude Code session, `CLAUDE_SUB_PARENT` (that session's pid), so mods in it can tell whose subsession it is. [assumptions-pane](https://github.com/lucas-saldanha-werneck/assumptions-pane) 0.6.0 uses them to list the subsession's assumptions in the starting session's pane.
 

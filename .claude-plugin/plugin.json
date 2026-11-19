@@ -1,6 +1,6 @@
 {
   "name": "subsessions",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Run long tasks in Code Mode in a separate Claude Code session, driven from a session that keeps Remote Control on.",
   "author": {
     "name": "Lucas Saldanha Werneck",

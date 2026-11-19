@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 (2026-11-19)
+
+- `claude-sub start` gives the subsession two variables: `CLAUDE_SUB_NAME` (its name) and `CLAUDE_SUB_PARENT` (the pid of the session that started it, when there is one; a stale `CLAUDE_PID` with no session file no longer counts as the starting session). Both are cleared from what a subsession inherits, like the other session variables. A mod in the subsession can tell it is one, and whose: assumptions-pane 0.6.0 shows the subsession's assumptions in the starting session's pane, in any folder.
+
 ## 0.2.1 (2026-11-19)
 
 - The status band shows only the subsessions this session started. Before, every Claude window on the computer showed every subsession. `claude-sub start` records the starting session (tmux option `@parent`); a subsession started by an older version still shows everywhere.

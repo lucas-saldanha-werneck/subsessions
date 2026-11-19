@@ -17,7 +17,7 @@ is how many seconds `start` waits.
 """
 import json, os, re, shlex, shutil, subprocess, sys, time
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 MIN_CLAUDE = (2, 1, 323)
 SOCKET = os.environ.get("CLAUDE_SUB_SOCKET", "claude-sub")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -30,6 +30,8 @@ SESSION_ENV = [
     "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID",
     "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SSE_PORT", "NO_COLOR", "FORCE_COLOR",
+    # Set by claude-sub itself for each subsession (below), never inherited from a caller.
+    "CLAUDE_SUB_NAME", "CLAUDE_SUB_PARENT",
 ]
 SESSION_ENV_PREFIXES = ("CLAUDE_AGENT_SDK_", "CLAUDE_PREVIEW_", "CLAUDE_AUTO_RETRY_")
 
@@ -37,10 +39,11 @@ SESSION_ENV_PREFIXES = ("CLAUDE_AGENT_SDK_", "CLAUDE_PREVIEW_", "CLAUDE_AUTO_RET
 def owner_pid():
     """The pid of the Claude Code session running this command: CLAUDE_PID, or the nearest
     parent process that has a session file. None outside a session."""
-    pid = os.environ.get("CLAUDE_PID", "")
-    if pid.isdigit():
-        return int(pid)
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    pid = os.environ.get("CLAUDE_PID", "")
+    # Only a live session's pid: a shell left open after its claude exited keeps a stale CLAUDE_PID.
+    if pid.isdigit() and os.path.exists(os.path.join(cfg, "sessions", f"{pid}.json")):
+        return int(pid)
     cur = os.getppid()
     for _ in range(20):
         if cur <= 1:
@@ -180,14 +183,17 @@ def cmd_start(a):
     if name in taken:
         die(f"a subsession named {name} already runs")
     claude = [exe, "--name", name] + (["--model", a.model] if a.model else [])
+    # The session that started it: only its status band shows this subsession.
+    parent = owner_pid()
+    # The subsession's own plugins can tell it is one, and whose: its name and the pid of the session
+    # that started it (assumptions-pane shows its assumptions in that session's list).
+    sub_env = f"CLAUDE_SUB_NAME={shlex.quote(name)} " + (f"CLAUDE_SUB_PARENT={parent} " if parent else "")
     inner = (unset_snippet() + f"cd {shlex.quote(folder)} && "
-             f"CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 exec {' '.join(shlex.quote(x) for x in claude)}")
+             f"CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 {sub_env}exec {' '.join(shlex.quote(x) for x in claude)}")
     r = tmux("new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", folder,
              "sh -c " + shlex.quote(inner), env=clean_env())
     if r.returncode != 0:
         die(f"tmux could not start the subsession: {r.stderr.strip()}")
-    # The session that started it: only its status band shows this subsession.
-    parent = owner_pid()
     if parent:
         tmux("set-option", "-t", f"={name}:", "@parent", str(parent))
 

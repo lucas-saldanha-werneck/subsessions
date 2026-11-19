@@ -19,6 +19,14 @@ phone ──Remote Control──▶ main session ──SendMessage──▶ subs
 
 - **`subsession` skill**: tells Claude when to use a subsession, the message protocol (`progress:`, `done:`, `question:`), and to check the result before calling it done.
 - **`claude-sub`**: starts, lists, shows and stops subsessions.
+- **Status band** (a [mod](https://code.claude.com/docs/en/plugins/mods/interface)): in the terminal and the desktop app, one row per running subsession directly above the prompt. Nothing is drawn while none runs.
+
+```
+⚙ sub-docs · busy · 2/3 git status · Bash: git status --porcelain · 1m20s · $0.21 · ctx 5% · 410 MB
+✓ sub-tests · done · 14 tests pass · 3m02s · $0.48 · ctx 12% · 380 MB
+```
+
+  Each row: state (busy, idle, question, waiting for permission, done), the last `progress:` step, the current tool call, time on the current task, cost and context used (read from the subsession's status line; token counts when it shows none), and the memory of its process. It checks every 4 seconds while a subsession runs and every 10 seconds otherwise.
 
 | Command | What it does |
 |---|---|
@@ -43,6 +51,7 @@ Then ask Claude: "use a subsession to …", or type `/subsession`.
 
 - Claude Code v2.1.323 or later (native build), with a model that supports Code Mode (Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.2). See the [Code Mode requirements](https://code.claude.com/docs/en/code-mode#requirements).
 - tmux and Python 3.8+. macOS or Linux.
+- The status band needs mods (hooks modules), which Claude Code loads from installed plugins.
 
 ## Settings
 
@@ -56,7 +65,7 @@ Then ask Claude: "use a subsession to …", or type `/subsession`.
 ## Limits
 
 - You cannot see a subsession from the phone: Code Mode has no Remote Control. You see what the main session relays.
-- It does not show in the subagent panel. `claude-sub list` shows busy or idle only.
+- It does not show in the subagent panel. The status band (terminal and desktop app) and `claude-sub list` show it; the phone app does not draw the band.
 - Each message counts toward usage like a typed prompt.
 - A Code Mode session resumes only in a terminal with `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1`.
 - Code Mode is experimental and can change in any Claude Code release.
@@ -67,7 +76,7 @@ Then ask Claude: "use a subsession to …", or type `/subsession`.
 bash tests/run.sh
 ```
 
-Unit tests, plus end-to-end tests that drive real tmux with a fake `claude`.
+Unit tests, end-to-end tests that drive real tmux with a fake `claude`, and the status band's parsing tests (Node 22.18 or later). CI also runs `claude plugin validate` and `claude plugin test` (the band drawn on the terminal and desktop surfaces).
 
 ## License
 

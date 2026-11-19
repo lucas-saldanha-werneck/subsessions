@@ -12,6 +12,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: tmux
         run: if [ "$RUNNER_OS" = macOS ]; then brew install tmux; else sudo apt-get update -q && sudo apt-get install -y -q tmux; fi
       - run: bash tests/run.sh
+      # pinned: a new Claude Code release must not change the result without a commit here
+      - run: npm i -g @anthropic-ai/claude-code@2.1.327
+      - uses: oven-sh/setup-bun@v2
+      - run: claude plugin validate . && claude plugin test .

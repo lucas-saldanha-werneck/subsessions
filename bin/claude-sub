@@ -17,7 +17,7 @@ is how many seconds `start` waits.
 """
 import json, os, re, shlex, shutil, subprocess, sys, time
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 MIN_CLAUDE = (2, 1, 323)
 SOCKET = os.environ.get("CLAUDE_SUB_SOCKET", "claude-sub")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

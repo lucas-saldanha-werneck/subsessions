@@ -30,13 +30,15 @@ At most 2 run at once (`CLAUDE_SUB_MAX`): each one is a full Claude Code process
 
    ```
    Protocol: you are a subsession. Report to the sender (copy the `from` of this message as your `to`):
-   - after each step, one line: "progress: <step> (<n>/<total>)"
+   - as soon as a step is finished, send one line: "progress: <step> (<n>/<total>)"
+     Send it in its own tool call or code run, right after that step and before the next one starts.
+     Never collect the progress lines and send them together at the end: they must arrive live.
    - at the end: "done: <result>", with the paths of anything you wrote
    - if you are stuck or need a decision: "question: <question>", then wait
    Do not ask the user directly: nobody watches your screen.
    ```
 
-3. **Relay.** Each `progress:` message starts a turn here: tell the user in one short line ("Subsession: step 2/5, reading the files"). Do not poll `claude-sub list` or the screen in a loop.
+3. **Relay.** Each `progress:` message starts a turn here: tell the user in one short line ("Subsession: step 2/5, reading the files"). Do not poll `claude-sub list` or the screen in a loop: in the terminal, the status band above the prompt already shows each subsession live. If all the `progress:` lines of a task arrive at the same moment, the subsession batched them: remind it of the protocol in the next task.
 4. **Questions.** For a `question:` line, answer it yourself when the user's request already answers it; otherwise ask the user and send the answer back.
 5. **Check the result.** A `done:` message is a claim. Open the files, run the check, and say what you verified.
 6. **Stop it.** `claude-sub stop <name>`, unless the user wants to send more tasks to it.

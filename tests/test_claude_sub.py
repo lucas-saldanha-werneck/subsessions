@@ -53,9 +53,23 @@ class Unit(unittest.TestCase):
         self.assertEqual(cs.default_name("/a/x", ["sub-x", "sub-x-2"]), "sub-x-3")
         self.assertTrue(cs.NAME_RE.match(cs.default_name("/a/çã ~!", [])))
 
+    def test_owner_pid_needs_a_live_session(self):
+        cfg = tempfile.mkdtemp()
+        os.makedirs(os.path.join(cfg, "sessions"))
+        old = dict(os.environ)
+        try:
+            os.environ.update(CLAUDE_CONFIG_DIR=cfg, CLAUDE_PID="4242")
+            self.assertIsNone(cs.owner_pid())   # stale: no session file for 4242
+            open(os.path.join(cfg, "sessions", "4242.json"), "w").close()
+            self.assertEqual(cs.owner_pid(), 4242)
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+            shutil.rmtree(cfg, ignore_errors=True)
+
     def test_clean_env(self):
         env = cs.clean_env({"CLAUDECODE": "1", "CLAUDE_AGENT_SDK_X": "1", "PATH": "/bin", "HOME": "/h",
-                            "CLAUDE_CODE_MESSAGING_SOCKET": "s"})
+                            "CLAUDE_CODE_MESSAGING_SOCKET": "s", "CLAUDE_SUB_PARENT": "1", "CLAUDE_SUB_NAME": "x"})
         self.assertEqual(env, {"PATH": "/bin", "HOME": "/h"})
 
     def test_unset_snippet_runs(self):
@@ -81,8 +95,13 @@ class EndToEnd(unittest.TestCase):
         self.folder = os.path.join(self.tmp, "proj")
         os.mkdir(self.folder)
         self.sock = f"claude-sub-test-{os.getpid()}-{int(time.time() * 1000) % 100000}"
+        # A config folder of the test's own: no session file, so no parent unless a test adds one.
+        self.cfg = os.path.join(self.tmp, "cfg")
+        os.makedirs(os.path.join(self.cfg, "sessions"))
         self.env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"],
-                        CLAUDE_SUB_SOCKET=self.sock, CLAUDE_SUB_TIMEOUT="15", CLAUDECODE="1")
+                        CLAUDE_SUB_SOCKET=self.sock, CLAUDE_SUB_TIMEOUT="15", CLAUDECODE="1",
+                        CLAUDE_CONFIG_DIR=self.cfg)
+        self.env.pop("CLAUDE_PID", None)
 
     def tearDown(self):
         subprocess.run(["tmux", "-L", self.sock, "kill-server"], capture_output=True)
@@ -105,13 +124,15 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("CODE_MODE=1 CLAUDECODE=unset", scr)   # Code Mode set, parent session vars removed
         self.assertIn("ARGS=--name sub-proj --model sonnet", scr)
         # Started outside any session (no CLAUDE_PID, no session file above): a name, no parent.
-        self.assertIn("SUB_NAME=sub-proj SUB_PARENT=", scr)
+        self.assertIn("SUB_NAME=sub-proj SUB_PARENT=unset", scr)
         rows = json.loads(self.run_cli("list").stdout)
         self.assertEqual([x["name"] for x in rows], ["sub-proj"])
         r = self.run_cli("stop", "sub-proj")
         self.assertEqual(json.loads(r.stdout), {"stopped": ["sub-proj"], "left": []})
 
     def test_start_records_the_owner_session(self):
+        with open(os.path.join(self.cfg, "sessions", "4242.json"), "w") as f:
+            f.write("{}")
         r = self.run_cli("start", self.folder, "--name", "owned", CLAUDE_PID="4242")
         self.assertEqual(r.returncode, 0, r.stderr)
         o = subprocess.run(["tmux", "-L", self.sock, "show-options", "-v", "-t", "=owned:", "@parent"],

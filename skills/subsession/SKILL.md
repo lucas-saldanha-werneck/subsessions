@@ -18,7 +18,7 @@ A subagent cannot do this: it runs inside this session and follows this session'
 | `claude-sub start <folder> --yes [--name N] [--model M]` | starts the subsession and waits until Code Mode is on; prints JSON with `name` and `sessionId` |
 | `claude-sub list` | running subsessions with `status` (busy / idle) |
 | `claude-sub stop <name>` or `--all` | ends it |
-| `claude-sub show <name>` | opens a terminal window attached to it, for the user at the computer |
+| `claude-sub show <name>` | opens a terminal window attached to it, for the user at the computer (when this session runs in tmux, the user already has a `⚙ <name>` tab in the tmux bar) |
 | `claude-sub screen <name>` | prints the end of its screen; only when messages stop arriving |
 
 At most 2 run at once (`CLAUDE_SUB_MAX`): each one is a full Claude Code process.

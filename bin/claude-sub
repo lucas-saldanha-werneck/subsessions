@@ -11,13 +11,18 @@ answers the same way. Code Mode turns Remote Control off, so this keeps the two 
   claude-sub show <name> [--print]                           watch it in a terminal tab (macOS iTerm/Terminal)
   claude-sub screen <name> [--lines N]                       print the end of its screen (for trouble only)
 
+When the starting session runs inside tmux, each subsession also gets a tab (window) in that tmux
+session, named after it; selecting the tab shows its conversation, and the tab closes when the
+subsession ends. The tab is created in the background: the current window keeps the focus.
+
 Settings (environment): CLAUDE_SUB_MAX (default 2) caps how many run at once,
 CLAUDE_SUB_SOCKET (default claude-sub) is the tmux socket name, CLAUDE_SUB_TIMEOUT (default 90)
-is how many seconds `start` waits.
+is how many seconds `start` waits, CLAUDE_SUB_TAB=0 turns the tab off, CLAUDE_SUB_TAB_PREFIX
+(default "⚙ ") goes before the subsession's name in the tab.
 """
 import json, os, re, shlex, shutil, subprocess, sys, time
 
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 MIN_CLAUDE = (2, 1, 323)
 SOCKET = os.environ.get("CLAUDE_SUB_SOCKET", "claude-sub")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -113,6 +118,73 @@ def default_name(folder, taken):
 def tmux(*args, check=False, env=None):
     return subprocess.run(["tmux", "-L", SOCKET, *args], capture_output=True, text=True,
                           check=check, env=env)
+
+
+def tmux_bin():
+    return shutil.which("tmux") or "tmux"   # a new window's shell may not have Homebrew on its PATH
+
+
+def parent_tmux():
+    """(socket path, session id) of the tmux session the calling session runs in, or None when it
+    does not run in tmux (desktop app, plain terminal) or the tab is turned off."""
+    if os.environ.get("CLAUDE_SUB_TAB", "1") == "0":
+        return None
+    sock = os.environ.get("TMUX", "").split(",")[0]
+    pane = os.environ.get("TMUX_PANE", "")
+    # A subsession that starts another one runs on our own socket: its tab would attach to itself.
+    if not sock or not pane or os.path.basename(sock) == SOCKET:
+        return None
+    r = subprocess.run(["tmux", "-S", sock, "display-message", "-p", "-t", pane, "#{session_id}"],
+                       capture_output=True, text=True)
+    sid = r.stdout.strip()
+    return (sock, sid) if r.returncode == 0 and sid.startswith("$") else None
+
+
+def open_tab(name, where):
+    """Add a background window to the starting session's tmux session that shows the subsession.
+    Its only process is a tmux client attached to the subsession, so the window closes by itself
+    when the subsession ends (stopped, killed or crashed). Returns the window id or None."""
+    sock, sid = where
+    tm = tmux_bin()
+    label = os.environ.get("CLAUDE_SUB_TAB_PREFIX", "\u2699 ") + name
+    # The target is quoted by hand: shlex leaves "=name" bare, and zsh (a common default-shell, which
+    # tmux runs the command with) expands a bare "=name" to the path of a command called name.
+    attach = (f"exec env -u TMUX {shlex.quote(tm)} -L {shlex.quote(SOCKET)} "
+              f"attach-session -t '={name}'")
+    # -d: never take the focus from the window the user is in. -n also turns automatic-rename off.
+    r = subprocess.run([tm, "-S", sock, "new-window", "-d", "-P", "-F", "#{window_id}",
+                        "-t", f"{sid}:", "-n", label, attach], capture_output=True, text=True)
+    wid = r.stdout.strip()
+    if r.returncode != 0 or not wid.startswith("@"):
+        return None
+    for opt, val in (("remain-on-exit", "off"), ("allow-rename", "off"), ("@claude-sub", name)):
+        subprocess.run([tm, "-S", sock, "set-option", "-w", "-t", wid, opt, val], capture_output=True)
+    # The tab is the conversation only: no second status bar inside it.
+    tmux("set-option", "-t", f"={name}:", "status", "off")
+    tmux("set-option", "-t", f"={name}:", "@tab-socket", sock)
+    tmux("set-option", "-t", f"={name}:", "@tab-window", wid)
+    return wid
+
+
+def tab_of(name):
+    """(socket path, window id) of a subsession's tab, read before the subsession goes away."""
+    def opt(o):
+        r = tmux("show-options", "-v", "-t", f"={name}:", o)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    sock, wid = opt("@tab-socket"), opt("@tab-window")
+    return (sock, wid) if sock and wid else None
+
+
+def close_tab(name, tab):
+    """Remove the tab if it is still there. It normally closes by itself; the name check keeps a
+    reused window id (a restarted tmux server) from closing someone else's window."""
+    if not tab:
+        return
+    sock, wid = tab
+    r = subprocess.run(["tmux", "-S", sock, "show-options", "-w", "-v", "-t", wid, "@claude-sub"],
+                       capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip() == name:
+        subprocess.run(["tmux", "-S", sock, "kill-window", "-t", wid], capture_output=True)
 
 
 def running():
@@ -225,6 +297,9 @@ def cmd_start(a):
         stop(name)
         die(f"Code Mode was not on after the wait (state: {state}). Last screen:\n{capture(name)[-1500:]}")
 
+    where = parent_tmux()
+    tab = open_tab(name, where) if where else None
+
     info = None
     end = time.time() + 20
     while time.time() < end and not info:
@@ -235,6 +310,7 @@ def cmd_start(a):
         "name": name, "folder": folder, "codeMode": "on",
         "sessionId": (info or {}).get("sessionId"), "pid": (info or {}).get("pid"),
         "watch": f"tmux -L {SOCKET} attach -t {name}",
+        "tab": bool(tab),
         "next": f"SendMessage to \"{name}\" with the task and notify_when_idle: true",
     }, indent=1))
 
@@ -242,6 +318,7 @@ def cmd_start(a):
 def stop(name, wait=10):
     if name not in running():
         return False
+    tab = tab_of(name)
     for _ in range(2):
         tmux("send-keys", "-t", f"={name}:", "C-c")
         time.sleep(0.8)
@@ -250,6 +327,7 @@ def stop(name, wait=10):
         time.sleep(0.5)
     if name in running():
         tmux("kill-session", "-t", f"={name}")
+    close_tab(name, tab)
     return True
 
 
@@ -279,7 +357,7 @@ def cmd_list(a):
 def cmd_show(a):
     if a.name not in running():
         die(f"no subsession named {a.name} (claude-sub list)")
-    tm = shutil.which("tmux") or "tmux"   # a new terminal window may not have Homebrew on its PATH
+    tm = tmux_bin()
     attach = f"{shlex.quote(tm)} -L {shlex.quote(SOCKET)} attach -t {shlex.quote(a.name)}"
     if a.print or sys.platform != "darwin":
         print(attach)

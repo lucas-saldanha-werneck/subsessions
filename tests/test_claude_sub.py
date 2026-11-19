@@ -102,6 +102,9 @@ class EndToEnd(unittest.TestCase):
                         CLAUDE_SUB_SOCKET=self.sock, CLAUDE_SUB_TIMEOUT="15", CLAUDECODE="1",
                         CLAUDE_CONFIG_DIR=self.cfg)
         self.env.pop("CLAUDE_PID", None)
+        # Never the tmux the tests run in: a tab would open in the developer's own session.
+        self.env.pop("TMUX", None)
+        self.env.pop("TMUX_PANE", None)
 
     def tearDown(self):
         subprocess.run(["tmux", "-L", self.sock, "kill-server"], capture_output=True)
@@ -178,6 +181,108 @@ class EndToEnd(unittest.TestCase):
         r = self.run_cli("start", self.folder, FAKE_VERSION="2.1.300")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("claude update", r.stderr)
+
+    # --- the tab in the starting session's own tmux ---------------------------------------------
+    # A throwaway "user" tmux server stands in for the user's: a session with one window, like the
+    # session claude-auto-retry makes, and TMUX/TMUX_PANE pointing at it as a session inside it sees.
+
+    def user_tmux(self):
+        self.outer = self.sock + "-user"
+        self.addCleanup(subprocess.run, ["tmux", "-L", self.outer, "kill-server"], capture_output=True)
+        subprocess.run(["tmux", "-L", self.outer, "-f", "/dev/null", "new-session", "-d", "-s", "main",
+                        "-x", "120", "-y", "40", "sleep 300"], check=True)
+        # zsh as the shell tmux runs the tab's command with, where there is one: it expands a bare "=word".
+        if shutil.which("zsh"):
+            self.outer_q("set-option", "-g", "default-shell", shutil.which("zsh"))
+        o = self.outer_q("display-message", "-p", "-t", "=main:", "#{socket_path},#{pid},0 #{pane_id}").split()
+        return {"TMUX": o[0], "TMUX_PANE": o[1]}, o[1]
+
+    def outer_q(self, *args):
+        return subprocess.run(["tmux", "-L", self.outer, *args], capture_output=True, text=True).stdout.strip()
+
+    def windows(self):
+        out = self.outer_q("list-windows", "-t", "=main", "-F", "#{window_id}|#{window_name}|#{@claude-sub}|#{window_active}")
+        return [l.split("|") for l in out.splitlines()]
+
+    def wait_for(self, cond, secs=10):
+        end = time.time() + secs
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.2)
+        return cond()
+
+    def test_tab_opens_in_the_user_session_and_closes_on_stop(self):
+        env, pane = self.user_tmux()
+        r = self.run_cli("start", self.folder, "--name", "tabbed", CLAUDE_SUB_TAB_PREFIX="sub:", **env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(json.loads(r.stdout)["tab"])
+        w = self.windows()
+        self.assertEqual(len(w), 2, w)
+        main, tab = w
+        self.assertEqual(tab[1:3], ["sub:tabbed", "tabbed"])
+        self.assertEqual(main[3], "1")   # the user's window kept the focus (new-window -d)
+        self.assertEqual(tab[3], "0")
+        # The tab shows the subsession's conversation (a tmux client attached to it, no inner bar).
+        self.assertTrue(self.wait_for(lambda: "is on" in self.outer_q("capture-pane", "-p", "-t", tab[0])),
+                        self.outer_q("capture-pane", "-p", "-t", tab[0]))
+        self.assertEqual(subprocess.run(["tmux", "-L", self.sock, "show-options", "-v", "-t", "=tabbed:", "status"],
+                                        capture_output=True, text=True).stdout.strip(), "off")
+        # The pane id claude-auto-retry types into ($TMUX_PANE of the main session) is unchanged.
+        self.assertEqual(self.outer_q("display-message", "-p", "-t", pane, "#{window_id}"), main[0])
+        # list and the other commands still work.
+        self.assertEqual([x["name"] for x in json.loads(self.run_cli("list").stdout)], ["tabbed"])
+        r = self.run_cli("stop", "tabbed")
+        self.assertEqual(json.loads(r.stdout), {"stopped": ["tabbed"], "left": []})
+        self.assertTrue(self.wait_for(lambda: len(self.windows()) == 1), self.windows())
+        self.assertEqual(self.windows()[0][0], main[0])
+
+    def test_mouse_click_switches_to_the_tab_and_back(self):
+        # A real client attached to the "user" session, inside a driver tmux that types mouse clicks
+        # (SGR sequences) into it, as a terminal would. The bar is laid out as "[0][1]" on the last row.
+        env, _ = self.user_tmux()
+        for o in (("mouse", "on"), ("status-left", ""), ("status-right", ""), ("window-status-format", "[#I]"),
+                  ("window-status-current-format", "[#I]"), ("window-status-separator", "")):
+            self.outer_q("set-option", "-g", *o)
+        self.assertEqual(self.run_cli("start", self.folder, "--name", "clicky", **env).returncode, 0)
+        drv = self.sock + "-drv"
+        self.addCleanup(subprocess.run, ["tmux", "-L", drv, "kill-server"], capture_output=True)
+        subprocess.run(["tmux", "-L", drv, "-f", "/dev/null", "new-session", "-d", "-s", "d", "-x", "60", "-y", "20",
+                        f"unset TMUX; exec tmux -L {self.outer} attach-session -t main"], check=True)
+        active = lambda: self.outer_q("display-message", "-p", "-t", "=main:", "#{window_index}")
+        screen = lambda: subprocess.run(["tmux", "-L", drv, "capture-pane", "-p", "-t", "d:"],
+                                        capture_output=True, text=True).stdout
+
+        def click(x, y=20):
+            subprocess.run(["tmux", "-L", drv, "send-keys", "-t", "d:", "-l", f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m"])
+
+        self.assertTrue(self.wait_for(lambda: "[0][1]" in screen()), screen())
+        self.assertEqual(active(), "0")
+        click(5)                                   # the subsession's tab
+        self.assertTrue(self.wait_for(lambda: active() == "1"), screen())
+        self.assertTrue(self.wait_for(lambda: "is on" in screen()), screen())   # its conversation shows
+        self.assertIn("[0][1]", screen())          # the user's bar stays; no second bar inside
+        click(10, 5)                               # a click inside the conversation does not trap the mouse
+        click(2)                                   # back to the main window
+        self.assertTrue(self.wait_for(lambda: active() == "0"), screen())
+
+    def test_tab_closes_when_the_subsession_dies(self):
+        env, _ = self.user_tmux()
+        self.assertEqual(self.run_cli("start", self.folder, "--name", "dies", **env).returncode, 0)
+        self.assertTrue(self.wait_for(lambda: len(self.windows()) == 2), self.windows())
+        # Killed from outside claude-sub (crash, kill-session): the attached client exits, so does the tab.
+        subprocess.run(["tmux", "-L", self.sock, "kill-session", "-t", "=dies"], check=True)
+        self.assertTrue(self.wait_for(lambda: len(self.windows()) == 1), self.windows())
+
+    def test_no_tab_outside_tmux_or_when_off(self):
+        env, _ = self.user_tmux()
+        r = self.run_cli("start", self.folder, "--name", "plain")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(json.loads(r.stdout)["tab"])
+        r = self.run_cli("start", self.folder, "--name", "off", CLAUDE_SUB_TAB="0", **env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(json.loads(r.stdout)["tab"])
+        self.assertEqual(len(self.windows()), 1)
 
     def test_missing_folder_and_unknown_name(self):
         self.assertIn("folder not found", self.run_cli("start", os.path.join(self.tmp, "nope")).stderr)

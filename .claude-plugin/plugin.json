@@ -1,6 +1,6 @@
 {
   "name": "subsessions",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Run long tasks in Code Mode in a separate Claude Code session, driven from a session that keeps Remote Control on.",
   "author": {
     "name": "Lucas Saldanha Werneck",
@@ -9,5 +9,5 @@
   "homepage": "https://github.com/lucas-saldanha-werneck/subsessions",
   "repository": "https://github.com/lucas-saldanha-werneck/subsessions",
   "license": "MIT",
-  "keywords": ["code-mode", "remote-control", "sessions", "tmux", "cross-session"]
+  "keywords": ["mod", "code-mode", "remote-control", "sessions", "tmux", "cross-session"]
 }

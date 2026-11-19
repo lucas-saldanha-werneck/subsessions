@@ -265,6 +265,7 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: "is on" in screen()), screen())   # its conversation shows
         self.assertIn("[0][1]", screen())          # the user's bar stays; no second bar inside
         click(10, 5)                               # a click inside the conversation does not trap the mouse
+        time.sleep(0.8)   # past tmux's double-click time: two quick clicks are a double click (no status binding)
         click(2)                                   # back to the main window
         self.assertTrue(self.wait_for(lambda: active() == "0"), screen())
 

@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""claude-sub: run Claude Code "subsessions" in Code Mode, driven from your main session.
+
+A subsession is a separate interactive `claude` started in Code Mode inside a hidden tmux session.
+Your main session (which can keep Remote Control on) talks to it with SendMessage; the subsession
+answers the same way. Code Mode turns Remote Control off, so this keeps the two apart.
+
+  claude-sub start <folder> [--name N] [--model M] [--yes]   start one and wait until Code Mode is on
+  claude-sub list                                            subsessions running now (JSON)
+  claude-sub stop <name> | --all                             end one or all
+  claude-sub show <name> [--print]                           watch it in a terminal tab (macOS iTerm/Terminal)
+  claude-sub screen <name> [--lines N]                       print the end of its screen (for trouble only)
+
+Settings (environment): CLAUDE_SUB_MAX (default 2) caps how many run at once,
+CLAUDE_SUB_SOCKET (default claude-sub) is the tmux socket name, CLAUDE_SUB_TIMEOUT (default 90)
+is how many seconds `start` waits.
+"""
+import json, os, re, shlex, shutil, subprocess, sys, time
+
+VERSION = "0.1.0"
+MIN_CLAUDE = (2, 1, 323)
+SOCKET = os.environ.get("CLAUDE_SUB_SOCKET", "claude-sub")
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+# Variables a Claude Code session sets for its own children. A claude started from inside a session
+# inherits them and then misbehaves (for example it does not save its transcript), so they are removed.
+SESSION_ENV = [
+    "CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_PLUGIN_DATA", "CLAUDE_PLUGIN_ROOT",
+    "CLAUDE_PROJECT_DIR", "CLAUDE_ENV_FILE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SSE_PORT", "NO_COLOR", "FORCE_COLOR",
+]
+SESSION_ENV_PREFIXES = ("CLAUDE_AGENT_SDK_", "CLAUDE_PREVIEW_", "CLAUDE_AUTO_RETRY_")
+
+
+def die(msg, code=1):
+    print(f"claude-sub: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def clean_env(env=None):
+    env = dict(os.environ if env is None else env)
+    for k in list(env):
+        if k in SESSION_ENV or k.startswith(SESSION_ENV_PREFIXES):
+            del env[k]
+    return env
+
+
+def unset_snippet():
+    """sh code that removes the same variables inside the tmux window (a tmux server that already
+    runs keeps the environment it was started with)."""
+    pat = ";".join(f"s/^\\({p}[A-Za-z0-9_]*\\)=.*/\\1/p" for p in SESSION_ENV_PREFIXES)
+    return (f"unset {' '.join(SESSION_ENV)} 2>/dev/null; "
+            f"for v in $(env | sed -n '{pat}'); do unset \"$v\"; done; ")
+
+
+def parse_version(text):
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def classify(screen):
+    """Read the subsession's screen. Returns (state, detail)."""
+    s = screen or ""
+    m = re.search(r"Code Mode \(experimental\) isn.t available[^\n]*", s)
+    if m:
+        return "unavailable", re.sub(r"\s+", " ", m.group(0)).strip(" │")
+    if "Code Mode (experimental) is on" in s:
+        return "on", ""
+    if "Yes, turn on Code Mode" in s:
+        return "confirm", ""
+    if "Yes, I trust this folder" in s:
+        return "trust", ""
+    return "starting", ""
+
+
+def default_name(folder, taken):
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(os.path.abspath(folder))).strip("-.") or "sub"
+    base = "sub-" + base[:40]
+    if base not in taken:
+        return base
+    i = 2
+    while f"{base}-{i}" in taken:
+        i += 1
+    return f"{base}-{i}"
+
+
+def tmux(*args, check=False, env=None):
+    return subprocess.run(["tmux", "-L", SOCKET, *args], capture_output=True, text=True,
+                          check=check, env=env)
+
+
+def running():
+    r = tmux("list-sessions", "-F", "#{session_name}")
+    if r.returncode != 0:
+        return []
+    return [n for n in r.stdout.split() if n]
+
+
+def capture(name, lines=200):
+    r = tmux("capture-pane", "-p", "-J", "-S", f"-{lines}", "-t", f"={name}:")
+    return r.stdout if r.returncode == 0 else ""
+
+
+def agents():
+    try:
+        r = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=20)
+        d = json.loads(r.stdout or "[]")
+    except Exception:
+        return []
+    if isinstance(d, dict):
+        d = d.get("agents", [])
+    return d if isinstance(d, list) else []
+
+
+def agent_for(name):
+    for a in agents():
+        if a.get("name") == name and a.get("kind") == "interactive":
+            return a
+    return None
+
+
+def claude_path():
+    """The claude to run: CLAUDE_SUB_CLAUDE, or the one on PATH, as a full path. The tmux window gets the
+    full path because its shell startup files can put a different claude first on PATH."""
+    p = os.environ.get("CLAUDE_SUB_CLAUDE") or shutil.which("claude")
+    if not p:
+        die("claude is not on PATH (or set CLAUDE_SUB_CLAUDE)")
+    return os.path.abspath(p)
+
+
+def check_claude(path):
+    try:
+        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=30).stdout
+    except Exception as e:
+        die(f"could not run claude --version: {e}")
+    v = parse_version(out)
+    if v and v < MIN_CLAUDE:
+        die(f"Code Mode needs Claude Code {'.'.join(map(str, MIN_CLAUDE))} or later (found {out.strip()}); run: claude update")
+
+
+def cmd_start(a):
+    if not shutil.which("tmux"):
+        die("tmux is not installed (macOS: brew install tmux)")
+    folder = os.path.abspath(os.path.expanduser(a.folder))
+    if not os.path.isdir(folder):
+        die(f"folder not found: {folder}")
+    exe = claude_path()
+    check_claude(exe)
+    taken = running()
+    limit = int(os.environ.get("CLAUDE_SUB_MAX", "2"))
+    if len(taken) >= limit:
+        die(f"{len(taken)} subsessions already run ({', '.join(taken)}); the limit is {limit} "
+            f"(CLAUDE_SUB_MAX). Stop one first: claude-sub stop <name>")
+    name = a.name or default_name(folder, taken)
+    if not NAME_RE.match(name):
+        die(f"bad name {name!r}: use letters, digits, dot, dash or underscore (max 64)")
+    if name in taken:
+        die(f"a subsession named {name} already runs")
+    claude = [exe, "--name", name] + (["--model", a.model] if a.model else [])
+    inner = (unset_snippet() + f"cd {shlex.quote(folder)} && "
+             f"CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 exec {' '.join(shlex.quote(x) for x in claude)}")
+    r = tmux("new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", folder,
+             "sh -c " + shlex.quote(inner), env=clean_env())
+    if r.returncode != 0:
+        die(f"tmux could not start the subsession: {r.stderr.strip()}")
+
+    deadline = time.time() + float(os.environ.get("CLAUDE_SUB_TIMEOUT", "90"))
+    answered = False
+    state, detail = "starting", ""
+    while time.time() < deadline:
+        if name not in running():
+            die(f"the subsession exited while starting. Last screen:\n{capture(name)[-1500:]}")
+        state, detail = classify(capture(name))
+        if state == "on":
+            break
+        if state == "unavailable":
+            stop(name)
+            die(f"Code Mode did not start: {detail}")
+        if state == "trust":
+            stop(name)
+            die(f"Claude asks whether to trust {folder}. Open claude there once and answer it, then retry.")
+        if state == "confirm" and not answered:
+            if not a.yes:
+                stop(name)
+                die("Claude asks to confirm Code Mode the first time. Run again with --yes to accept it.")
+            tmux("send-keys", "-t", f"={name}:", "Down")
+            time.sleep(0.5)
+            tmux("send-keys", "-t", f"={name}:", "Enter")
+            answered = True
+        time.sleep(1.5)
+    if state != "on":
+        stop(name)
+        die(f"Code Mode was not on after the wait (state: {state}). Last screen:\n{capture(name)[-1500:]}")
+
+    info = None
+    end = time.time() + 20
+    while time.time() < end and not info:
+        info = agent_for(name)
+        if not info:
+            time.sleep(2)
+    print(json.dumps({
+        "name": name, "folder": folder, "codeMode": "on",
+        "sessionId": (info or {}).get("sessionId"), "pid": (info or {}).get("pid"),
+        "watch": f"tmux -L {SOCKET} attach -t {name}",
+        "next": f"SendMessage to \"{name}\" with the task and notify_when_idle: true",
+    }, indent=1))
+
+
+def stop(name, wait=10):
+    if name not in running():
+        return False
+    for _ in range(2):
+        tmux("send-keys", "-t", f"={name}:", "C-c")
+        time.sleep(0.8)
+    end = time.time() + wait
+    while time.time() < end and name in running():
+        time.sleep(0.5)
+    if name in running():
+        tmux("kill-session", "-t", f"={name}")
+    return True
+
+
+def cmd_stop(a):
+    names = running() if a.all else [a.name]
+    if not a.all and not a.name:
+        die("give a name or --all", 2)
+    out = []
+    for n in names:
+        if stop(n):
+            out.append(n)
+        elif not a.all:
+            die(f"no subsession named {n} (claude-sub list)")
+    print(json.dumps({"stopped": out, "left": running()}))
+
+
+def cmd_list(a):
+    by_name = {x.get("name"): x for x in agents() if x.get("kind") == "interactive"}
+    rows = []
+    for n in running():
+        x = by_name.get(n, {})
+        rows.append({"name": n, "status": x.get("status", "unknown"), "sessionId": x.get("sessionId"),
+                     "folder": x.get("cwd"), "pid": x.get("pid")})
+    print(json.dumps(rows, indent=1))
+
+
+def cmd_show(a):
+    if a.name not in running():
+        die(f"no subsession named {a.name} (claude-sub list)")
+    tm = shutil.which("tmux") or "tmux"   # a new terminal window may not have Homebrew on its PATH
+    attach = f"{shlex.quote(tm)} -L {shlex.quote(SOCKET)} attach -t {shlex.quote(a.name)}"
+    if a.print or sys.platform != "darwin":
+        print(attach)
+        return
+    if os.path.isdir("/Applications/iTerm.app"):
+        script = ('tell application "iTerm"\n'
+                  f'  create window with default profile command "{attach}"\n'
+                  'end tell')
+    else:
+        script = f'tell application "Terminal" to do script "{attach}"'
+    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        die(f"could not open a terminal window ({r.stderr.strip()}); run yourself: {attach}")
+    print(f"opened a window attached to {a.name} (detach with Ctrl-b d; that leaves it running)")
+
+
+def cmd_screen(a):
+    if a.name not in running():
+        die(f"no subsession named {a.name} (claude-sub list)")
+    lines = [l.rstrip() for l in capture(a.name, a.lines).splitlines()]
+    print("\n".join(l for l in lines if l.strip()))
+
+
+def main(argv=None):
+    import argparse
+    p = argparse.ArgumentParser(prog="claude-sub", description=__doc__.split("\n")[0])
+    p.add_argument("--version", action="version", version=f"claude-sub {VERSION}")
+    sp = p.add_subparsers(dest="cmd", required=True)
+    s = sp.add_parser("start", help="start a subsession in Code Mode")
+    s.add_argument("folder")
+    s.add_argument("--name")
+    s.add_argument("--model")
+    s.add_argument("--yes", action="store_true", help="accept the first-time Code Mode confirmation")
+    s.set_defaults(fn=cmd_start)
+    s = sp.add_parser("list", help="subsessions running now")
+    s.set_defaults(fn=cmd_list)
+    s = sp.add_parser("stop", help="end a subsession")
+    s.add_argument("name", nargs="?")
+    s.add_argument("--all", action="store_true")
+    s.set_defaults(fn=cmd_stop)
+    s = sp.add_parser("show", help="watch a subsession in a terminal window")
+    s.add_argument("name")
+    s.add_argument("--print", action="store_true", help="only print the attach command")
+    s.set_defaults(fn=cmd_show)
+    s = sp.add_parser("screen", help="print the end of a subsession's screen")
+    s.add_argument("name")
+    s.add_argument("--lines", type=int, default=60)
+    s.set_defaults(fn=cmd_screen)
+    a = p.parse_args(argv)
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()
